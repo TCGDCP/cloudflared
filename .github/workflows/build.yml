@@ -1,0 +1,96 @@
+name: Build cloudflared Multi-Arch Binaries and Create Release
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    # 使用 strategy matrix 来定义要构建的架构
+    strategy:
+      fail-fast: false
+      matrix:
+        # 定义要构建的操作系统和架构组合
+        include:
+          - goos: linux
+            goarch: amd64
+          - goos: linux
+            goarch: arm64
+          - goos: windows
+            goarch: amd64
+          - goos: darwin
+            goarch: amd64
+          # 更多架构组合...
+
+    runs-on: ubuntu-latest # 使用标准的 Ubuntu Runner
+
+    steps:
+      - name: ⬇️ Checkout code (检出代码)
+        uses: actions/checkout@v4
+
+      - name: ⚙️ Setup Go (设置 Go 环境)
+        uses: actions/setup-go@v5
+        with:
+          # 使用 cloudflared 推荐的 Go 版本
+          go-version: '1.25.3'
+
+      # (可选) 如果编译过程中有C代码依赖，可能需要安装C交叉编译工具
+      # - name: Install C Cross-Compiler (for CGO)
+      #   if: ${{ matrix.goos != 'windows' && matrix.goos != 'darwin' }}
+      #   run: |
+      #     sudo apt-get update && sudo apt-get install -y gcc-aarch64-linux-gnu
+
+      - name: 🔨 Build cloudflared for ${{ matrix.goos }}-${{ matrix.goarch }} (构建二进制文件)
+        # Go 交叉编译的核心：设置环境变量 GOOS 和 GOARCH
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: 0 # 禁用 CGO 进行静态编译，通常更安全
+        run: |
+          # 定义输出文件名，包含 OS 和 Arch
+          output_name="cloudflared-${{ matrix.goos }}-${{ matrix.goarch }}"
+          if [ "${{ matrix.goos }}" == "windows" ]; then
+            output_name="${output_name}.exe"
+          fi
+
+          # 执行编译命令 (假设 cloudflared 入口在 ./cmd/cloudflared)
+          go build -ldflags "-s -w" -o ./$output_name ./cmd/cloudflared
+
+      - name: 📦 Archive and Upload Artifact (上传构建产物)
+        uses: actions/upload-artifact@v4
+        with:
+          name: cloudflared-binaries-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: cloudflared-*
+
+  release:
+    needs: build # 确保 build 成功后才运行
+    runs-on: ubuntu-latest
+    steps:
+      - name: ⬇️ Download all artifacts (下载所有构建产物)
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts # 下载到 artifacts 文件夹
+
+      - name: 📝 Release Tag and Type (确定 Release 标签和类型)
+        id: release_info
+        run: |
+          # 格式为YYYY.MM.DD
+          TAG_NAME="$(date -u +'%Y.%m.%d')"
+          BODY_TEXT="官方编译版本"
+          echo "将创建正式Release，标签名为: $TAG_NAME"
+
+          echo "tag_name=$TAG_NAME" >> $GITHUB_OUTPUT
+          echo "body_text=$BODY_TEXT" >> $GITHUB_OUTPUT
+
+
+      - name: 🏷️ Create GitHub Release (创建 GitHub Release)
+        uses: softprops/action-gh-release@v2
+        with:
+          # 使用动态或 Tag 名称
+          tag_name: ${{ steps.release_info.outputs.tag_name }}
+          # 确保手动 Release 指向当前的 Commit SHA
+          target_commitish: ${{ github.sha }}
+          # 移除 draft 和 prerelease，依赖 action 的默认值 (false)
+          body: ${{ steps.release_info.outputs.body_text }}
+          files: artifacts/**/cloudflared-* # 上传 artifacts 目录下的所有二进制文件
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} # 需要 Secrets 权限来创建 Release
